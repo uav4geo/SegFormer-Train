@@ -14,12 +14,17 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from PIL import Image
 import numpy as np
 
+try:
+    torch.set_float32_matmul_precision('high')
+except:
+    pass
+
 MODEL_ID = "nvidia/segformer-b0-finetuned-ade-512-512"
 
 class SemanticSegmentationDataset(Dataset):
     """Image (semantic) segmentation dataset."""
 
-    def __init__(self, root_dir, feature_extractor):
+    def __init__(self, root_dir, feature_extractor, use_cache=False):
         self.root_dir = root_dir
         self.feature_extractor = feature_extractor
         self.classes_csv_file = os.path.join(self.root_dir, "_classes.csv")
@@ -33,10 +38,15 @@ class SemanticSegmentationDataset(Dataset):
         self.images = sorted(image_file_names)
         self.masks = sorted(mask_file_names)
 
+        self.use_cache = use_cache
+        self.cache = {}
+
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
+        if self.use_cache and idx in self.cache:
+            return self.cache[idx]
         
         image = Image.open(os.path.join(self.root_dir, self.images[idx]))
         segmentation_map = Image.open(os.path.join(self.root_dir, self.masks[idx]))
@@ -46,6 +56,9 @@ class SemanticSegmentationDataset(Dataset):
         for k,v in encoded_inputs.items():
           encoded_inputs[k].squeeze_()
 
+        if self.use_cache:
+            self.cache[idx] = encoded_inputs
+        
         return encoded_inputs
 
 
@@ -220,6 +233,12 @@ def main():
         help="Path to Roboflow's dataset directory with segmentation masks"
     )
     parser.add_argument(
+        "--epochs", "-e",
+        type=int, 
+        default=400,
+        help="Max epochs"
+    )
+    parser.add_argument(
         "--batch-size", "-b",
         type=int, 
         default=8,
@@ -228,23 +247,30 @@ def main():
     parser.add_argument(
         "--workers", "-w",
         type=int, 
-        default=3,
+        default=1,
         help="Number of data loader workers"
     )
+    parser.add_argument(
+        "--in-memory",
+        action="store_true",
+        default=False,
+        help="Load dataset in memory"
+    )
+    
     args = parser.parse_args()
 
     feature_extractor = SegformerFeatureExtractor.from_pretrained(MODEL_ID)
     feature_extractor.reduce_labels = False
     feature_extractor.size = 128
 
-    train_dataset = SemanticSegmentationDataset(os.path.join(args.input, "train"), feature_extractor)
-    val_dataset = SemanticSegmentationDataset(os.path.join(args.input, "valid"), feature_extractor)
-    test_dataset = SemanticSegmentationDataset(os.path.join(args.input, "test"), feature_extractor)
+    train_dataset = SemanticSegmentationDataset(os.path.join(args.input, "train"), feature_extractor, use_cache=args.in_memory)
+    val_dataset = SemanticSegmentationDataset(os.path.join(args.input, "valid"), feature_extractor, use_cache=args.in_memory)
+    test_dataset = SemanticSegmentationDataset(os.path.join(args.input, "test"), feature_extractor, use_cache=args.in_memory)
 
     batch_size = args.batch_size
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=args.workers, prefetch_factor=8)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=args.workers, prefetch_factor=8)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, num_workers=args.workers, prefetch_factor=8)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=args.workers, prefetch_factor=8, persistent_workers=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=args.workers, prefetch_factor=8, persistent_workers=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, num_workers=args.workers, prefetch_factor=8, persistent_workers=True)
 
     segformer_finetuner = SegformerFinetuner(
         train_dataset.id2label, 
@@ -267,7 +293,7 @@ def main():
     trainer = pl.Trainer(
         gpus=1, 
         callbacks=[early_stop_callback, checkpoint_callback],
-        max_epochs=500,
+        max_epochs=args.epochs,
         val_check_interval=len(train_dataloader),
     )
 
