@@ -1,0 +1,4 @@
+pytorch-lightning==1.9.5
+transformers>=4.48.2
+datasets==2.21.0
+pillow>=11.1.0
